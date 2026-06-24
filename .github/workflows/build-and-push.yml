@@ -12,11 +12,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set image tag
+        id: vars
+        run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
       - name: Build Docker image
-        run: docker build -t 100.112.196.74:30002/mlops-core/test-app:latest .
+        run: docker build -t 100.112.196.74:30002/mlops-core/test-app:${{ steps.vars.outputs.tag }} .
 
       - name: Login to Harbor
         run: docker login 100.112.196.74:30002 -u ${{ secrets.HARBOR_USERNAME }} -p ${{ secrets.HARBOR_PASSWORD }}
 
       - name: Push to Harbor
-        run: docker push 100.112.196.74:30002/mlops-core/test-app:latest
+        run: docker push 100.112.196.74:30002/mlops-core/test-app:${{ steps.vars.outputs.tag }}
+
+      - name: Update mlops-deploy manifest
+        run: |
+          git clone git@github.com:juneejun23/mlops-deploy.git /tmp/mlops-deploy
+          cd /tmp/mlops-deploy
+          sed -i "s|test-app:.*|test-app:${{ steps.vars.outputs.tag }}|" k8s/fastapi-server/deployment.yaml
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Update fastapi-server image to ${{ steps.vars.outputs.tag }}" || echo "No changes to commit"
+          git push origin main
