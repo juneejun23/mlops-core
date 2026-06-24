@@ -1,7 +1,7 @@
 from minio import Minio
 from datetime import timedelta
 
-MINIO_ENDPOINT = "minio.minio.svc.cluster.local:9000"
+MINIO_ENDPOINT = "minio-api.100.112.196.74.nip.io:31135"
 MINIO_ACCESS_KEY = "minio"
 MINIO_SECRET_KEY = "quHCnPBfDaYU0UsV0vfM"
 BUCKET_NAME = "hyjk826-mlops-1011"
