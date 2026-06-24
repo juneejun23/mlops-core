@@ -25,10 +25,16 @@ jobs:
       - name: Push to Harbor
         run: docker push 100.112.196.74:30002/mlops-core/test-app:${{ steps.vars.outputs.tag }}
 
+      - name: Checkout mlops-deploy
+        uses: actions/checkout@v4
+        with:
+          repository: juneejun23/mlops-deploy
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          path: mlops-deploy
+
       - name: Update mlops-deploy manifest
         run: |
-          git clone git@github.com:juneejun23/mlops-deploy.git /tmp/mlops-deploy
-          cd /tmp/mlops-deploy
+          cd mlops-deploy
           sed -i "s|test-app:.*|test-app:${{ steps.vars.outputs.tag }}|" k8s/fastapi-server/deployment.yaml
           git config user.name "github-actions"
           git config user.email "actions@github.com"
