@@ -12,8 +12,8 @@ def health_check():
     return {"status": "ok"}
 
 @app.post("/presigned-url")
-def presigned_url(task_id: str, filename: str):
-    object_key = f"tenants/dummy/tasks/{task_id}/input/{filename}"
+def presigned_url(tenant_id: str, task_id: str, filename: str):
+    object_key = f"tenants/{tenant_id}/tasks/{task_id}/input/{filename}"
     upload_url = get_upload_url(object_key)
     return {"upload_url": upload_url, "object_key": object_key}
 
