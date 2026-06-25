@@ -30,8 +30,8 @@ class BaseConsumer(AbstractConsumer):
         self.result_topic = os.environ.get("RESULT_TOPIC", "inference-result-topic")
         self.group_id = os.environ.get("CONSUMER_GROUP", f"{model_name}-group")
 
-        self.redis_host = os.environ.get("REDIS_HOST", "redis.mlops-backend.svc.cluster.local")
-        self.redis_port = int(os.environ.get("REDIS_PORT", 6379))
+        self.redis_host = os.environ.get("MLOPS_REDIS_HOST", "redis.mlops-backend.svc.cluster.local")
+        self.redis_port = int(os.environ.get("MLOPS_REDIS_PORT", 6379))
         self.metrics_port = int(os.environ.get("METRICS_PORT", 8080))
 
         self.s3_client = boto3.client(
