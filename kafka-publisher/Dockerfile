@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY kafka-publisher/ .
 
-CMD ["python", "publisher.py"]
+CMD ["python", "-u", "publisher.py"]
