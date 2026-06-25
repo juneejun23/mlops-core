@@ -1,1 +1,10 @@
-kafka-python
+aiokafka
+redis
+tritonclient[grpc]
+boto3
+numpy
+pillow
+sqlalchemy
+psycopg2-binary
+aiohttp
+prometheus-client

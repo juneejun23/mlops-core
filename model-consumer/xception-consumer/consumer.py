@@ -1,26 +1,41 @@
-import json
-from kafka import KafkaConsumer
+import sys
+import os
+import numpy as np
+from PIL import Image
 
-KAFKA_BOOTSTRAP_SERVERS = "my-kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
-TOPIC = "input-topic-xception"
-
-consumer = KafkaConsumer(
-    TOPIC,
-    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-    value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    group_id="xception-consumer-group",
-)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from image_base_consumer import ImageBaseConsumer
 
 
-def process_message(payload):
-    print(f"Received message: {payload}")
-    task_id = payload["task_id"]
-    input_key = payload["input_key"]
-    num_image = payload["num_image"]
-    print(f"task_id={task_id}, input_key={input_key}, num_image={num_image}")
+class XceptionConsumer(ImageBaseConsumer):
+    def setreqvram(self):
+        self.req_vram = 7480
+
+    def preprocess(self, file_path):
+        img = Image.open(file_path).convert('RGB')
+        img = img.resize((256, 256))
+
+        img_data = np.array(img).astype(np.float32)
+        img_data = (img_data / 255.0 - 0.5) / 0.5
+        img_data = np.transpose(img_data, (2, 0, 1))
+
+        return np.expand_dims(img_data, axis=0)
+
+    def postprocess(self, raw_output):
+        logits = raw_output[0]
+        probs = self.softmax(logits)
+
+        pred_idx = np.argmax(probs)
+        label = "FAKE" if pred_idx == 1 else "REAL"
+
+        return {
+            "label": label,
+            "logits": logits.tolist(),
+            "probabilities": probs.tolist()
+        }
 
 
 if __name__ == "__main__":
-    print(f"xception-consumer started. Listening on topic: {TOPIC}")
-    for message in consumer:
-        process_message(message.value)
+    consumer = XceptionConsumer(model_name="xception")
+    consumer.setreqvram()
+    consumer.start()
