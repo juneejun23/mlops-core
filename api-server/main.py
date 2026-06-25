@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from database import get_db, Task
+from database import get_db, Task, Outbox
 from storage import get_upload_url
 import uuid
 
@@ -30,6 +30,28 @@ def create_task(tenant_id: str, model_id: str, num_image: int, db: Session = Dep
     db.commit()
     return {"task_id": task_id, "status": "PENDING"}
 
+@app.post("/tasks/{task_id}/complete")
+def upload_complete(task_id: str, object_key: str, db: Session = Depends(get_db)):
+    task = db.query(Task).filter(Task.task_id == task_id).first()
+    if task is None:
+        return {"error": "task not found"}
+
+    task.status = "QUEUED"
+
+    new_event = Outbox(
+        task_id=task.task_id,
+        model_id=task.model_id,
+        type="inference-request",
+        payload={
+            "task_id": task.task_id,
+            "input_key": object_key,
+            "num_image": task.num_image,
+        },
+    )
+    db.add(new_event)
+    db.commit()
+
+    return {"task_id": task_id, "status": "QUEUED"}
 
 @app.get("/tasks/{task_id}")
 def get_task(task_id: str, db: Session = Depends(get_db)):

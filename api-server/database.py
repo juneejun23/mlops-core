@@ -22,7 +22,16 @@ class Task(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+class Outbox(Base):
+    __tablename__ = "outbox"
 
+    outbox_id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String, nullable=False)
+    model_id = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
 def get_db():
     db = SessionLocal()
     try:
