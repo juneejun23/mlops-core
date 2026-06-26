@@ -5,6 +5,8 @@ import signal
 import sys
 import redis
 
+# trigger rebuild
+
 REDIS_HOST = os.environ.get("MLOPS_REDIS_HOST", "redis.mlops-backend.svc.cluster.local")
 REDIS_PORT = int(os.environ.get("MLOPS_REDIS_PORT", 6379))
 TRITON_PORT = int(os.environ.get("TRITON_PORT", 8000))
