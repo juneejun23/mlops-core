@@ -1,0 +1,5 @@
+kafka-python
+redis
+sqlalchemy
+psycopg2-binary
+boto3
