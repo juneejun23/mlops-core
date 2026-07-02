@@ -26,5 +26,19 @@ def get_upload_url(object_key: str) -> str:
         expires=timedelta(minutes=5),
     )
 
-
 ensure_bucket()
+
+TRAINING_BUCKET_NAME = "training-data"
+
+def ensure_training_bucket():
+    if not minio_client.bucket_exists(TRAINING_BUCKET_NAME):
+        minio_client.make_bucket(TRAINING_BUCKET_NAME)
+
+def get_training_upload_url(object_key: str) -> str:
+    return minio_client.presigned_put_object(
+        TRAINING_BUCKET_NAME,
+        object_key,
+        expires=timedelta(minutes=30),
+    )
+
+ensure_training_bucket()
