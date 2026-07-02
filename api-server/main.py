@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db, Task, Outbox
 from storage import get_upload_url
 import uuid
 from database import get_db, Task, Outbox, TrainingJob
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -104,9 +105,7 @@ def get_training_presigned_url(
         raise HTTPException(status_code=404, detail="Training job not found")
 
     object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/input/upload.zip"
-    upload_url = minio_client.presigned_put_object(
-        BUCKET_NAME, object_key, expires=timedelta(minutes=30)
-    )
+    upload_url = get_upload_url(object_key)
 
     job.zip_path = object_key
     job.updated_at = datetime.utcnow()
