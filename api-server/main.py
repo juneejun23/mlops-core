@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from database import get_db, Task, Outbox
 from storage import get_upload_url
 import uuid
+from database import get_db, Task, Outbox, TrainingJob
 
 app = FastAPI()
 
