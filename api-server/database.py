@@ -31,7 +31,24 @@ class Outbox(Base):
     type = Column(String, nullable=False)
     payload = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
+class TrainingJob(Base):
+    __tablename__ = "training_job"
+
+    training_job_id = Column(String, primary_key=True)
+    status = Column(String, nullable=False, default="PENDING")
+    architecture = Column(String, nullable=False)
+    epochs = Column(Integer, nullable=False)
+    batch_size = Column(Integer, nullable=False)
+    lr = Column(Float, nullable=False)
+    face_based = Column(Boolean, nullable=False)
+    zip_path = Column(String, default="")
+    result_url = Column(String, default="")
+    metrics = Column(JSON)
+    error_msg = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
 def get_db():
     db = SessionLocal()
     try:

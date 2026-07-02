@@ -65,3 +65,60 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
         "status": task.status,
         "result_url": task.result_url,
     }
+
+@app.post("/training-jobs")
+def create_training_job(
+    tenant_id: str,
+    architecture: str,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    face_based: bool,
+    db: Session = Depends(get_db)
+):
+    training_job_id = f"training-{uuid.uuid4().hex[:12]}"
+    new_job = TrainingJob(
+        training_job_id=training_job_id,
+        architecture=architecture,
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        face_based=face_based,
+    )
+    db.add(new_job)
+    db.commit()
+    return {"training_job_id": training_job_id, "status": "PENDING"}
+
+
+@app.post("/training-jobs/{training_job_id}/presigned-url")
+def get_training_presigned_url(
+    training_job_id: str,
+    tenant_id: str,
+    db: Session = Depends(get_db)
+):
+    job = db.query(TrainingJob).filter(
+        TrainingJob.training_job_id == training_job_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+
+    object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/input/upload.zip"
+    upload_url = minio_client.presigned_put_object(
+        BUCKET_NAME, object_key, expires=timedelta(minutes=30)
+    )
+
+    job.zip_path = object_key
+    job.updated_at = datetime.utcnow()
+    db.commit()
+
+    return {"upload_url": upload_url, "object_key": object_key}
+
+
+@app.get("/training-jobs/{training_job_id}")
+def get_training_job(training_job_id: str, db: Session = Depends(get_db)):
+    job = db.query(TrainingJob).filter(
+        TrainingJob.training_job_id == training_job_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+    return job
