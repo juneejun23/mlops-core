@@ -4,3 +4,5 @@ numpy
 kafka-python
 mtcnn
 tensorflow
+sqlalchemy
+psycopg2-binary
