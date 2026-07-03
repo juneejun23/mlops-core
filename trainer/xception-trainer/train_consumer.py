@@ -1,8 +1,3 @@
-# trainer/xception-trainer/train_consumer.py
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'base'))
-
 import logging
 from base_train_consumer import BaseTrainConsumer
 

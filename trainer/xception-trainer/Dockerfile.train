@@ -5,7 +5,7 @@ WORKDIR /app
 COPY trainer/xception-trainer/requirements/train.txt .
 RUN pip install --no-cache-dir -r train.txt
 
-COPY trainer/base/ ./base/
+COPY trainer/base/ .
 COPY trainer/xception-trainer/train_consumer.py .
 
 CMD ["python", "-u", "train_consumer.py"]

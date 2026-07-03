@@ -1,8 +1,3 @@
-# trainer/xception-trainer/preprocess_consumer.py
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'base'))
-
 import numpy as np
 from PIL import Image
 from base_preprocess_consumer import BasePreprocessConsumer
