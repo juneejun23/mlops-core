@@ -40,4 +40,4 @@ class XceptionPreprocessConsumer(BasePreprocessConsumer):
 
 if __name__ == "__main__":
     consumer = XceptionPreprocessConsumer()
-    consumer.run()
+    consumer.run()# trigger rebuild
