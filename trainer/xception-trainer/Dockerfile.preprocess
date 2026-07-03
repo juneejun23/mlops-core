@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY trainer/xception-trainer/requirements/preprocess.txt .
+RUN pip install --no-cache-dir -r preprocess.txt
+
+COPY trainer/base/ ./base/
+COPY trainer/xception-trainer/preprocess_consumer.py .
+
+CMD ["python", "-u", "preprocess_consumer.py"]

@@ -1,0 +1,46 @@
+name: Build and Push Xception Preprocess Consumer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'trainer/xception-trainer/**'
+      - 'trainer/base/**'
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: docker build -f trainer/xception-trainer/Dockerfile.preprocess -t 100.112.196.74:30002/mlops-core/xception-preprocess:${{ steps.vars.outputs.tag }} .
+
+      - name: Login to Harbor
+        run: docker login 100.112.196.74:30002 -u ${{ secrets.HARBOR_USERNAME }} -p ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Push to Harbor
+        run: docker push 100.112.196.74:30002/mlops-core/xception-preprocess:${{ steps.vars.outputs.tag }}
+
+      - name: Checkout mlops-deploy
+        uses: actions/checkout@v4
+        with:
+          repository: juneejun23/mlops-deploy
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          path: mlops-deploy
+
+      - name: Update mlops-deploy manifest
+        run: |
+          cd mlops-deploy
+          sed -i "s|xception-preprocess:.*|xception-preprocess:${{ steps.vars.outputs.tag }}|" k8s/xception-preprocess/deployment.yaml
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Update xception-preprocess image to ${{ steps.vars.outputs.tag }}" || echo "No changes to commit"
+          git push origin main
