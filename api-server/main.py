@@ -131,6 +131,14 @@ def complete_training_job(training_job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
 
+    # 멱등성 보장 — outbox에 이미 같은 이벤트가 있으면 중복 삽입 안 함
+    existing = db.query(Outbox).filter(
+        Outbox.task_id == training_job_id,
+        Outbox.type == "preprocess-request"
+    ).first()
+    if existing:
+        return {"training_job_id": training_job_id, "status": job.status, "message": "Already queued"}
+
     job.status = "QUEUED"
     job.updated_at = datetime.utcnow()
 
@@ -151,5 +159,4 @@ def complete_training_job(training_job_id: str, db: Session = Depends(get_db)):
     db.add(new_event)
     db.commit()
 
-    return {"training_job_id": training_job_id, "status": "QUEUED"}# trigger rebuild
-# rebuild
+    return {"training_job_id": training_job_id, "status": "QUEUED"}
