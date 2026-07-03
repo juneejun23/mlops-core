@@ -36,7 +36,16 @@ def process_outbox_events():
     try:
         events = db.query(Outbox).order_by(Outbox.created_at.asc()).limit(100).all()
         for event in events:
-            topic = f"input-topic-{event.model_id}"
+            if event.type == "inference-request":
+                topic = f"input-topic-{event.model_id}"
+            elif event.type == "preprocess-request":
+                topic = "preprocess-topic"
+            else:
+                print(f"Unknown event type: {event.type}, skipping outbox_id={event.outbox_id}")
+                db.delete(event)
+                db.commit()
+                continue
+
             producer.send(topic, key=event.outbox_id, value=event.payload)
             producer.flush()
             db.delete(event)

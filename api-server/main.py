@@ -122,3 +122,33 @@ def get_training_job(training_job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
     return job
+
+@app.post("/training-jobs/{training_job_id}/complete")
+def complete_training_job(training_job_id: str, db: Session = Depends(get_db)):
+    job = db.query(TrainingJob).filter(
+        TrainingJob.training_job_id == training_job_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found")
+
+    job.status = "QUEUED"
+    job.updated_at = datetime.utcnow()
+
+    new_event = Outbox(
+        task_id=training_job_id,
+        model_id=job.architecture,
+        type="preprocess-request",
+        payload={
+            "training_job_id": training_job_id,
+            "zip_path": job.zip_path,
+            "architecture": job.architecture,
+            "epochs": job.epochs,
+            "batch_size": job.batch_size,
+            "lr": job.lr,
+            "face_based": job.face_based,
+        },
+    )
+    db.add(new_event)
+    db.commit()
+
+    return {"training_job_id": training_job_id, "status": "QUEUED"}
