@@ -152,3 +152,4 @@ def complete_training_job(training_job_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     return {"training_job_id": training_job_id, "status": "QUEUED"}# trigger rebuild
+# rebuild
