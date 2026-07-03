@@ -1,4 +1,3 @@
-# trainer/base/base_preprocess_consumer.py
 import os
 import json
 import zipfile
@@ -19,6 +18,7 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio.minio.svc.cluste
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "quHCnPBfDaYU0UsV0vfM")
 TRAINING_BUCKET = os.environ.get("TRAINING_BUCKET", "training-data")
+SKIP_THRESHOLD = float(os.environ.get("SKIP_THRESHOLD", "0.5"))
 
 
 class BasePreprocessConsumer(ABC):
@@ -44,11 +44,7 @@ class BasePreprocessConsumer(ABC):
         )
 
     @abstractmethod
-    def preprocess(self, image_path: str) -> bytes:
-        """
-        이미지 파일을 읽어서 전처리 후 numpy array를 bytes로 반환.
-        모델별로 오버라이드해야 함.
-        """
+    def preprocess(self, image_path: str, face_based: bool = False):
         pass
 
     def run(self):
@@ -56,11 +52,9 @@ class BasePreprocessConsumer(ABC):
         for message in self.consumer:
             payload = message.value
             training_job_id = payload["training_job_id"]
-            zip_path = payload["zip_path"]
             logging.info(f"Received: {training_job_id}")
-
             try:
-                self._process(training_job_id, zip_path, payload)
+                self._process(training_job_id, payload["zip_path"], payload)
             except Exception as e:
                 logging.error(f"Failed: {training_job_id} | {e}")
 
@@ -68,6 +62,7 @@ class BasePreprocessConsumer(ABC):
         work_dir = f"/tmp/{training_job_id}"
         zip_local = f"{work_dir}/upload.zip"
         extract_dir = f"{work_dir}/data"
+        face_based = payload.get("face_based", False)
 
         # 1. zip 다운로드
         logging.info(f"[1/4] Downloading zip: {zip_path}")
@@ -89,23 +84,30 @@ class BasePreprocessConsumer(ABC):
             labels = json.load(f)
 
         # 4. 전처리 + MinIO 업로드
-        logging.info(f"[4/4] Preprocessing and uploading")
+        logging.info(f"[4/4] Preprocessing and uploading (face_based={face_based})")
         processed = {"real": [], "fake": [], "skipped": 0}
+        total = 0
 
-        all_images = list(Path(extract_dir).rglob("*.jpg")) + \
-                     list(Path(extract_dir).rglob("*.png")) + \
-                     list(Path(extract_dir).rglob("*.jpeg"))
+        all_images = (
+            list(Path(extract_dir).rglob("*.jpg")) +
+            list(Path(extract_dir).rglob("*.png")) +
+            list(Path(extract_dir).rglob("*.jpeg"))
+        )
 
         for img_path in all_images:
             filename = img_path.name
             if filename not in labels:
-                processed["skipped"] += 1
                 continue
 
+            total += 1
             label = labels[filename]
-            tensor_bytes = self.preprocess(str(img_path))
+            tensor_bytes = self.preprocess(str(img_path), face_based=face_based)
 
-            # MinIO에 전처리 결과 저장
+            if tensor_bytes is None:
+                processed["skipped"] += 1
+                logging.warning(f"Skipped (no face detected): {filename}")
+                continue
+
             object_key = f"tenants/preprocessed/{training_job_id}/{label}/{filename}.npy"
             self.s3.put_object(
                 Bucket=TRAINING_BUCKET,
@@ -113,6 +115,15 @@ class BasePreprocessConsumer(ABC):
                 Body=tensor_bytes,
             )
             processed[label].append(object_key)
+
+        # 스킵 비율 체크
+        if total > 0:
+            skip_ratio = processed["skipped"] / total
+            logging.info(f"Skip ratio: {skip_ratio:.1%} ({processed['skipped']}/{total})")
+            if skip_ratio >= SKIP_THRESHOLD:
+                raise Exception(
+                    f"Too many skipped images: {skip_ratio:.1%} >= {SKIP_THRESHOLD:.1%}. Job failed."
+                )
 
         logging.info(f"Preprocessed: real={len(processed['real'])}, fake={len(processed['fake'])}, skipped={processed['skipped']}")
 
