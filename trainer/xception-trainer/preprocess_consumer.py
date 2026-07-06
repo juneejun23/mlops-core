@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 from base_preprocess_consumer import BasePreprocessConsumer
-
+import io
 
 class XceptionPreprocessConsumer(BasePreprocessConsumer):
 
@@ -35,7 +35,9 @@ class XceptionPreprocessConsumer(BasePreprocessConsumer):
         img_array = np.array(img).astype(np.float32)
         img_array = (img_array / 255.0 - 0.5) / 0.5
         img_array = np.transpose(img_array, (2, 0, 1))
-        return img_array.tobytes()
+        buf = io.BytesIO()
+        np.save(buf, img_array)
+        return buf.getvalue()
 
 
 if __name__ == "__main__":
