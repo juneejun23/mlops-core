@@ -45,6 +45,15 @@ def update_training_job_status(training_job_id: str, status: str, error_msg: str
     finally:
         db.close()
 
+def get_training_job(training_job_id: str):
+    db = SessionLocal()
+    try:
+        result = db.execute(text(
+            "SELECT tenant_id, architecture FROM training_job WHERE training_job_id=:id"
+        ), {"id": training_job_id}).fetchone()
+        return result
+    finally:
+        db.close()
 
 class BasePreprocessConsumer(ABC):
 
@@ -90,7 +99,9 @@ class BasePreprocessConsumer(ABC):
         zip_local = f"{work_dir}/upload.zip"
         extract_dir = f"{work_dir}/data"
         face_based = payload.get("face_based", False)
-
+        job = get_training_job(training_job_id)
+        tenant_id = job.tenant_id
+        architecture = payload.get("architecture")
         try:
             # 1. zip 다운로드
             logging.info(f"[1/4] Downloading zip: {zip_path}")
@@ -136,7 +147,7 @@ class BasePreprocessConsumer(ABC):
                     logging.warning(f"Skipped (no face detected): {filename}")
                     continue
 
-                object_key = f"tenants/preprocessed/{training_job_id}/{label}/{filename}.npy"
+                object_key = object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/preprocessed/{architecture}/{label}/{filename}.npy"
                 self.s3.put_object(
                     Bucket=TRAINING_BUCKET,
                     Key=object_key,

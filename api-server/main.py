@@ -70,7 +70,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
 
 @app.post("/training-jobs")
 def create_training_job(
-    tenant_id: str,
+    tenant_id: str, 
     architecture: str,
     epochs: int,
     batch_size: int,
@@ -81,6 +81,7 @@ def create_training_job(
     training_job_id = f"training-{uuid.uuid4().hex[:12]}"
     new_job = TrainingJob(
         training_job_id=training_job_id,
+        tenant_id=tenant_id,
         architecture=architecture,
         epochs=epochs,
         batch_size=batch_size,

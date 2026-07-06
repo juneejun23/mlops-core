@@ -36,6 +36,7 @@ class TrainingJob(Base):
     __tablename__ = "training_job"
 
     training_job_id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="")
     status = Column(String, nullable=False, default="PENDING")
     architecture = Column(String, nullable=False)
     epochs = Column(Integer, nullable=False)
