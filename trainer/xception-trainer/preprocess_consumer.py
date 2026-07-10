@@ -11,8 +11,10 @@ class XceptionPreprocessConsumer(BasePreprocessConsumer):
 
     def _get_detector(self):
         if self._detector is None:
-            from mtcnn import MTCNN
-            self._detector = MTCNN()
+            import torch
+            from facenet_pytorch import MTCNN
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self._detector = MTCNN(keep_all=True, device=device)
         return self._detector
 
     def preprocess(self, image_path: str, face_based: bool = False):
@@ -21,14 +23,13 @@ class XceptionPreprocessConsumer(BasePreprocessConsumer):
 
         if face_based:
             detector = self._get_detector()
-            faces = detector.detect_faces(img_array)
-            if len(faces) == 0:
-                return None  # 얼굴 미검출 → 스킵
-            # 가장 큰 얼굴 선택
-            face = max(faces, key=lambda f: f['box'][2] * f['box'][3])
-            x, y, w, h = face['box']
-            x, y = max(0, x), max(0, y)
-            img_array = img_array[y:y+h, x:x+w]
+            boxes, _ = detector.detect(img_array)  # boxes: [[x1,y1,x2,y2], ...]
+            if boxes is None or len(boxes) == 0:
+                return None
+            # 가장 큰 얼굴 선택 (x2-x1) * (y2-y1) 기준
+            box = max(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
+            x1, y1, x2, y2 = [max(0, int(v)) for v in box]
+            img_array = img_array[y1:y2, x1:x2]
             img = Image.fromarray(img_array)
 
         img = img.resize((256, 256))

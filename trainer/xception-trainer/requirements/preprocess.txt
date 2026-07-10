@@ -2,7 +2,6 @@ boto3
 Pillow
 numpy
 kafka-python
-mtcnn
-tensorflow
+facenet-pytorch
 sqlalchemy
 psycopg2-binary
