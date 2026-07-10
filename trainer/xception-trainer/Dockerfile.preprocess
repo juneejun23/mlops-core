@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r preprocess.txt
 COPY trainer/base/ .
 COPY trainer/xception-trainer/preprocess_consumer.py .
 
-CMD ["python", "-u", "preprocess_consumer.py"]
+CMD ["python", "-u", "base_preprocess_consumer.py"]

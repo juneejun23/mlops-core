@@ -3,7 +3,7 @@ import json
 import zipfile
 import logging
 import shutil
-from abc import ABC, abstractmethod
+import io
 from pathlib import Path
 from kafka import KafkaConsumer, KafkaProducer
 import boto3
@@ -11,6 +11,9 @@ from botocore.client import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from PIL import Image
+import numpy as np
+import torch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -45,6 +48,7 @@ def update_training_job_status(training_job_id: str, status: str, error_msg: str
     finally:
         db.close()
 
+
 def get_training_job(training_job_id: str):
     db = SessionLocal()
     try:
@@ -55,7 +59,8 @@ def get_training_job(training_job_id: str):
     finally:
         db.close()
 
-class BasePreprocessConsumer(ABC):
+
+class BasePreprocessConsumer:
 
     def __init__(self):
         self.s3 = boto3.client(
@@ -76,10 +81,29 @@ class BasePreprocessConsumer(ABC):
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         )
+        self._detector = None
 
-    @abstractmethod
-    def preprocess(self, image_path: str, face_based: bool = False):
-        pass
+    def _get_detector(self):
+        if self._detector is None:
+            from facenet_pytorch import MTCNN
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self._detector = MTCNN(keep_all=True, device=device)
+            logging.info(f"MTCNN initialized on {device}")
+        return self._detector
+
+    def _crop_face(self, img_array: np.ndarray):
+        """얼굴 검출 + 크롭. 미검출 시 None 반환."""
+        detector = self._get_detector()
+        boxes, _ = detector.detect(img_array)
+        if boxes is None or len(boxes) == 0:
+            return None
+        # 가장 큰 얼굴 선택
+        box = max(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
+        x1, y1, x2, y2 = [max(0, int(v)) for v in box]
+        cropped = img_array[y1:y2, x1:x2]
+        if cropped.size == 0:
+            return None
+        return Image.fromarray(cropped)
 
     def run(self):
         logging.info("Preprocess consumer started. Listening on preprocess-topic...")
@@ -101,7 +125,7 @@ class BasePreprocessConsumer(ABC):
         face_based = payload.get("face_based", False)
         job = get_training_job(training_job_id)
         tenant_id = job.tenant_id
-        architecture = payload.get("architecture")
+
         try:
             # 1. zip 다운로드
             logging.info(f"[1/4] Downloading zip: {zip_path}")
@@ -122,8 +146,8 @@ class BasePreprocessConsumer(ABC):
             with open(labels_path) as f:
                 labels = json.load(f)
 
-            # 4. 전처리 + MinIO 업로드
-            logging.info(f"[4/4] Preprocessing and uploading (face_based={face_based})")
+            # 4. 크롭 + MinIO 업로드
+            logging.info(f"[4/4] Cropping and uploading (face_based={face_based})")
             processed = {"real": [], "fake": [], "skipped": 0}
             total = 0
 
@@ -140,18 +164,30 @@ class BasePreprocessConsumer(ABC):
 
                 total += 1
                 label = labels[filename]
-                tensor_bytes = self.preprocess(str(img_path), face_based=face_based)
 
-                if tensor_bytes is None:
-                    processed["skipped"] += 1
-                    logging.warning(f"Skipped (no face detected): {filename}")
-                    continue
+                img = Image.open(str(img_path)).convert("RGB")
+                img_array = np.array(img)
 
-                object_key = object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/preprocessed/{architecture}/{label}/{filename}.npy"
+                if face_based:
+                    cropped = self._crop_face(img_array)
+                    if cropped is None:
+                        processed["skipped"] += 1
+                        logging.warning(f"Skipped (no face detected): {filename}")
+                        continue
+                    img = cropped
+                else:
+                    img = Image.fromarray(img_array)
+
+                # .jpg로 저장
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG")
+                jpg_bytes = buf.getvalue()
+
+                object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/cropped/{label}/{filename}"
                 self.s3.put_object(
                     Bucket=TRAINING_BUCKET,
                     Key=object_key,
-                    Body=tensor_bytes,
+                    Body=jpg_bytes,
                 )
                 processed[label].append(object_key)
 
@@ -163,7 +199,7 @@ class BasePreprocessConsumer(ABC):
                         f"Too many skipped images: {skip_ratio:.1%} >= {SKIP_THRESHOLD:.1%}. Job failed."
                     )
 
-            logging.info(f"Preprocessed: real={len(processed['real'])}, fake={len(processed['fake'])}, skipped={processed['skipped']}")
+            logging.info(f"Cropped: real={len(processed['real'])}, fake={len(processed['fake'])}, skipped={processed['skipped']}")
 
             # 5. train-topic으로 발행
             train_payload = {
@@ -183,3 +219,8 @@ class BasePreprocessConsumer(ABC):
             if os.path.exists(work_dir):
                 shutil.rmtree(work_dir)
                 logging.info(f"Cleaned up: {work_dir}")
+
+
+if __name__ == "__main__":
+    consumer = BasePreprocessConsumer()
+    consumer.run()

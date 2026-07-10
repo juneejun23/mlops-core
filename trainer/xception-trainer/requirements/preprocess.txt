@@ -1,7 +1,9 @@
-boto3
+boto3==1.43.45
 Pillow
-numpy
-kafka-python
-facenet-pytorch
-sqlalchemy
-psycopg2-binary
+numpy==1.26.0
+kafka-python==3.0.8
+facenet-pytorch==2.6.0
+torch==2.2.2
+torchvision==0.17.2
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
