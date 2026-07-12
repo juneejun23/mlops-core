@@ -1,21 +1,13 @@
 import os
 import json
-import zipfile
 import logging
-import shutil
-import io
-from pathlib import Path
 from kafka import KafkaConsumer, KafkaProducer
 import boto3
 from botocore.client import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from PIL import Image
-import numpy as np
-import torch
-import ray
-from ray.data import ActorPoolStrategy
+from ray.job_submission import JobSubmissionClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -27,7 +19,8 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio.minio.svc.cluste
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "quHCnPBfDaYU0UsV0vfM")
 TRAINING_BUCKET = os.environ.get("TRAINING_BUCKET", "training-data")
-SKIP_THRESHOLD = float(os.environ.get("SKIP_THRESHOLD", "0.5"))
+
+RAY_DASHBOARD_URL = os.environ.get("RAY_DASHBOARD_URL", "http://ray-cluster-kuberay-head-svc.kuberay.svc.cluster.local:8265")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mlops:dashlove@postgres-cluster-rw.mlops-backend.svc.cluster.local:5432/mlops")
 engine = create_engine(DATABASE_URL)
@@ -62,74 +55,6 @@ def get_training_job(training_job_id: str):
         db.close()
 
 
-class MTCNNCropper:
-    """Ray Data Actor — MTCNN 얼굴 검출 + 크롭 + MinIO 저장."""
-
-    def __init__(self):
-        from facenet_pytorch import MTCNN as FacenetMTCNN
-        import torch
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.detector = FacenetMTCNN(keep_all=True, device=device)
-        self.s3 = boto3.client(
-            "s3",
-            endpoint_url=MINIO_ENDPOINT,
-            aws_access_key_id=MINIO_ACCESS_KEY,
-            aws_secret_access_key=MINIO_SECRET_KEY,
-            config=Config(signature_version="s3v4"),
-            region_name="us-east-1",
-        )
-        logging.info(f"MTCNNCropper initialized on {device}")
-
-    def __call__(self, batch: dict) -> dict:
-        keys = []
-        labels = []
-
-        for i in range(len(batch["path"])):
-            path = batch["path"][i]
-            label = batch["label"][i]
-            filename = batch["filename"][i]
-            training_job_id = batch["training_job_id"][i]
-            tenant_id = batch["tenant_id"][i]
-            face_based = batch["face_based"][i]
-
-            try:
-                img = Image.open(path).convert("RGB")
-                img_array = np.array(img)
-
-                if face_based:
-                    boxes, _ = self.detector.detect(img_array)
-                    if boxes is None or len(boxes) == 0:
-                        keys.append(None)
-                        labels.append(label)
-                        continue
-                    box = max(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
-                    x1, y1, x2, y2 = [max(0, int(v)) for v in box]
-                    cropped = img_array[y1:y2, x1:x2]
-                    if cropped.size == 0:
-                        keys.append(None)
-                        labels.append(label)
-                        continue
-                    img = Image.fromarray(cropped)
-
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG")
-                object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/cropped/{label}/{filename}"
-                self.s3.put_object(
-                    Bucket=TRAINING_BUCKET,
-                    Key=object_key,
-                    Body=buf.getvalue(),
-                )
-                keys.append(object_key)
-                labels.append(label)
-
-            except Exception as e:
-                logging.error(f"Error processing {filename}: {e}")
-                keys.append(None)
-                labels.append(label)
-
-        return {"key": keys, "label": labels}
-
-
 class BasePreprocessConsumer:
 
     def __init__(self):
@@ -151,18 +76,10 @@ class BasePreprocessConsumer:
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         )
+        self.ray_client = JobSubmissionClient(RAY_DASHBOARD_URL)
+        logging.info(f"Connected to Ray dashboard: {RAY_DASHBOARD_URL}")
 
     def run(self):
-        # Ray 클러스터 연결 — 한 번만
-        if not ray.is_initialized():
-            ray.init(
-                address="ray://ray-cluster-kuberay-head-svc.kuberay.svc.cluster.local:10001",
-                runtime_env={
-                    "pip": ["facenet-pytorch==2.6.0", "boto3==1.43.45", "Pillow", "numpy==1.26.0"]
-                }
-            )
-            logging.info("Connected to Ray cluster")
-
         logging.info("Preprocess consumer started. Listening on preprocess-topic...")
         for message in self.consumer:
             payload = message.value
@@ -170,105 +87,76 @@ class BasePreprocessConsumer:
             logging.info(f"Received: {training_job_id}")
             try:
                 update_training_job_status(training_job_id, "RUNNING")
-                self._process(training_job_id, payload["zip_path"], payload)
+                self._process(training_job_id, payload)
             except Exception as e:
                 logging.error(f"Failed: {training_job_id} | {e}")
                 update_training_job_status(training_job_id, "FAILED", error_msg=str(e))
 
-    def _process(self, training_job_id, zip_path, payload):
-        work_dir = f"/tmp/{training_job_id}"
-        zip_local = f"{work_dir}/upload.zip"
-        extract_dir = f"{work_dir}/data"
-        face_based = payload.get("face_based", False)
+    def _process(self, training_job_id, payload):
         job = get_training_job(training_job_id)
         tenant_id = job.tenant_id
 
-        try:
-            # 1. zip 다운로드
-            logging.info(f"[1/4] Downloading zip: {zip_path}")
-            os.makedirs(work_dir, exist_ok=True)
-            self.s3.download_file(TRAINING_BUCKET, zip_path, zip_local)
+        # payload에 tenant_id 추가
+        job_payload = {
+            "training_job_id": training_job_id,
+            "zip_path": payload["zip_path"],
+            "tenant_id": tenant_id,
+            "face_based": payload.get("face_based", False),
+        }
 
-            # 2. 압축 해제
-            logging.info(f"[2/4] Extracting zip")
-            os.makedirs(extract_dir, exist_ok=True)
-            with zipfile.ZipFile(zip_local, "r") as zf:
-                zf.extractall(extract_dir)
-
-            # 3. labels.json 파싱
-            logging.info(f"[3/4] Parsing labels.json")
-            labels_path = Path(extract_dir) / "labels.json"
-            if not labels_path.exists():
-                raise FileNotFoundError("labels.json not found")
-            with open(labels_path) as f:
-                labels = json.load(f)
-
-            # 4. Ray Data로 병렬 크롭 + MinIO 업로드
-            logging.info(f"[4/4] Cropping with Ray Data (face_based={face_based})")
-
-            all_images = (
-                list(Path(extract_dir).rglob("*.jpg")) +
-                list(Path(extract_dir).rglob("*.png")) +
-                list(Path(extract_dir).rglob("*.jpeg"))
-            )
-
-            items = [
-                {
-                    "path": str(img_path),
-                    "label": labels[img_path.name],
-                    "filename": img_path.name,
-                    "training_job_id": training_job_id,
-                    "tenant_id": tenant_id,
-                    "face_based": face_based,
-                }
-                for img_path in all_images
-                if img_path.name in labels
-            ]
-
-            total = len(items)
-
-            # Ray Dataset 생성 + 병렬 처리
-            ds = ray.data.from_items(items)
-            result_ds = ds.map_batches(
-                MTCNNCropper,
-                compute=ActorPoolStrategy(size=2),
-                batch_size=16,
-            )
-
-            # 결과 수집
-            results = result_ds.take_all()
-            real_keys = [r["key"] for r in results if r["label"] == "real" and r["key"] is not None]
-            fake_keys = [r["key"] for r in results if r["label"] == "fake" and r["key"] is not None]
-            skipped = len([r for r in results if r["key"] is None])
-
-            if total > 0:
-                skip_ratio = skipped / total
-                logging.info(f"Skip ratio: {skip_ratio:.1%} ({skipped}/{total})")
-                if skip_ratio >= SKIP_THRESHOLD:
-                    raise Exception(
-                        f"Too many skipped images: {skip_ratio:.1%} >= {SKIP_THRESHOLD:.1%}. Job failed."
-                    )
-
-            logging.info(f"Cropped: real={len(real_keys)}, fake={len(fake_keys)}, skipped={skipped}")
-
-            # 5. train-topic으로 발행
-            train_payload = {
-                "training_job_id": training_job_id,
-                "architecture": payload["architecture"],
-                "epochs": payload["epochs"],
-                "batch_size": payload["batch_size"],
-                "lr": payload["lr"],
-                "real_keys": real_keys,
-                "fake_keys": fake_keys,
+        # Ray Job 제출
+        logging.info(f"Submitting Ray Job for {training_job_id}")
+        job_id = self.ray_client.submit_job(
+            entrypoint=f"python preprocess_job.py --payload '{json.dumps(job_payload)}'",
+            runtime_env={
+                "working_dir": "/app",
+                "pip": ["facenet-pytorch==2.6.0", "boto3==1.43.45", "Pillow", "numpy==1.26.0"]
             }
-            self.producer.send(TRAIN_TOPIC, train_payload)
-            self.producer.flush()
-            logging.info(f"Sent to train-topic: {training_job_id}")
+        )
+        logging.info(f"Ray Job submitted: {job_id}")
 
-        finally:
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-                logging.info(f"Cleaned up: {work_dir}")
+        # Job 완료 대기
+        import time
+        from ray.job_submission import JobStatus
+        while True:
+            status = self.ray_client.get_job_status(job_id)
+            logging.info(f"Ray Job status: {status}")
+            if status == JobStatus.SUCCEEDED:
+                break
+            elif status in (JobStatus.FAILED, JobStatus.STOPPED):
+                logs = self.ray_client.get_job_logs(job_id)
+                raise Exception(f"Ray Job failed: {logs[-500:]}")
+            time.sleep(5)
+
+        # 결과 파싱 (stdout에서 RESULT: 라인 찾기)
+        logs = self.ray_client.get_job_logs(job_id)
+        result_line = [l for l in logs.split("\n") if l.startswith("RESULT:")]
+        if not result_line:
+            raise Exception("No result found in Ray Job output")
+        result = json.loads(result_line[-1].replace("RESULT:", ""))
+
+        real_keys = result["real_keys"]
+        fake_keys = result["fake_keys"]
+        skipped = result["skipped"]
+
+        logging.info(f"Cropped: real={len(real_keys)}, fake={len(fake_keys)}, skipped={skipped}")
+
+        # train-topic 발행
+        train_payload = {
+            "training_job_id": training_job_id,
+            "architecture": payload["architecture"],
+            "epochs": payload["epochs"],
+            "batch_size": payload["batch_size"],
+            "lr": payload["lr"],
+            "real_keys": real_keys,
+            "fake_keys": fake_keys,
+        }
+        self.producer.send(TRAIN_TOPIC, train_payload)
+        self.producer.flush()
+        logging.info(f"Sent to train-topic: {training_job_id}")
+
+        # DB COMPLETED 업데이트는 train-consumer가 담당
+        # 여기서는 전처리 완료 후 train-topic 발행까지만
 
 
 if __name__ == "__main__":
