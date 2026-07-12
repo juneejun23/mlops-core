@@ -24,6 +24,8 @@ SKIP_THRESHOLD = float(os.environ.get("SKIP_THRESHOLD", "0.5"))
 
 
 class MTCNNCropper:
+    """Ray Data Actor — MTCNN 얼굴 검출 + 크롭 + MinIO 저장."""
+
     def __init__(self):
         from facenet_pytorch import MTCNN as FacenetMTCNN
         import torch
@@ -44,7 +46,7 @@ class MTCNNCropper:
         labels_out = []
 
         for i in range(len(batch["minio_path"])):
-            minio_path = batch["minio_path"][i]  # MinIO 경로
+            minio_path = batch["minio_path"][i]
             label = batch["label"][i]
             filename = batch["filename"][i]
             training_job_id = batch["training_job_id"][i]
@@ -117,51 +119,56 @@ def main():
     work_dir = f"/tmp/{training_job_id}"
     zip_local = f"{work_dir}/upload.zip"
     extract_dir = f"{work_dir}/data"
+    items = []  # finally에서 접근하기 위해 미리 선언
 
     try:
         # 1. zip 다운로드
-        logging.info(f"[1/4] Downloading zip: {zip_path}")
+        logging.info(f"[1/5] Downloading zip: {zip_path}")
         os.makedirs(work_dir, exist_ok=True)
         s3.download_file(TRAINING_BUCKET, zip_path, zip_local)
 
         # 2. 압축 해제
-        logging.info(f"[2/4] Extracting zip")
+        logging.info(f"[2/5] Extracting zip")
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_local, "r") as zf:
             zf.extractall(extract_dir)
 
         # 3. labels.json 파싱
-        logging.info(f"[3/4] Parsing labels.json")
+        logging.info(f"[3/5] Parsing labels.json")
         labels_path = Path(extract_dir) / "labels.json"
         if not labels_path.exists():
             raise FileNotFoundError("labels.json not found")
         with open(labels_path) as f:
             labels = json.load(f)
 
-        # 4. Ray Data로 병렬 크롭 + MinIO 업로드
-        logging.info(f"[4/4] Cropping with Ray Data (face_based={face_based})")
-
+        # 4. 이미지를 MinIO 임시 경로에 업로드
+        logging.info(f"[4/5] Uploading images to MinIO tmp...")
         all_images = (
             list(Path(extract_dir).rglob("*.jpg")) +
             list(Path(extract_dir).rglob("*.png")) +
             list(Path(extract_dir).rglob("*.jpeg"))
         )
 
-        items = [
-            {
-                "path": str(img_path),
+        for img_path in all_images:
+            if img_path.name not in labels:
+                continue
+            tmp_minio_path = f"tenants/{tenant_id}/training-jobs/{training_job_id}/tmp/{img_path.name}"
+            with open(str(img_path), "rb") as f:
+                s3.put_object(Bucket=TRAINING_BUCKET, Key=tmp_minio_path, Body=f.read())
+            items.append({
+                "minio_path": tmp_minio_path,
                 "label": labels[img_path.name],
                 "filename": img_path.name,
                 "training_job_id": training_job_id,
                 "tenant_id": tenant_id,
                 "face_based": face_based,
-            }
-            for img_path in all_images
-            if img_path.name in labels
-        ]
+            })
 
         total = len(items)
+        logging.info(f"Uploaded {total} images to MinIO tmp")
 
+        # 5. Ray Data로 병렬 크롭 + MinIO 업로드
+        logging.info(f"[5/5] Cropping with Ray Data (face_based={face_based})")
         ds = ray.data.from_items(items)
         result_ds = ds.map_batches(
             MTCNNCropper,
@@ -182,7 +189,7 @@ def main():
 
         logging.info(f"Cropped: real={len(real_keys)}, fake={len(fake_keys)}, skipped={skipped}")
 
-        # 결과를 stdout으로 출력 — consumer가 읽어서 train-topic 발행
+        # 결과를 stdout으로 출력
         result = {
             "real_keys": real_keys,
             "fake_keys": fake_keys,
@@ -191,6 +198,14 @@ def main():
         print(f"RESULT:{json.dumps(result)}")
 
     finally:
+        # MinIO tmp 파일 삭제
+        if items:
+            logging.info("Cleaning up MinIO tmp files...")
+            s3.delete_objects(
+                Bucket=TRAINING_BUCKET,
+                Delete={"Objects": [{"Key": item["minio_path"]} for item in items]}
+            )
+        # /tmp 정리
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir)
             logging.info(f"Cleaned up: {work_dir}")
