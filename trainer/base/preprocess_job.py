@@ -164,7 +164,7 @@ def main():
         ds = ray.data.from_items(items)
         result_ds = ds.map_batches(
             MTCNNCropper,
-            compute=ActorPoolStrategy(size=2),
+            compute=ActorPoolStrategy(size=1),
             batch_size=16,
         )
 
