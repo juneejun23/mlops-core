@@ -14,6 +14,8 @@ from datetime import datetime
 from PIL import Image
 import numpy as np
 import torch
+import ray
+from ray.data import ActorPoolStrategy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -60,6 +62,74 @@ def get_training_job(training_job_id: str):
         db.close()
 
 
+class MTCNNCropper:
+    """Ray Data Actor — MTCNN 얼굴 검출 + 크롭 + MinIO 저장."""
+
+    def __init__(self):
+        from facenet_pytorch import MTCNN as FacenetMTCNN
+        import torch
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.detector = FacenetMTCNN(keep_all=True, device=device)
+        self.s3 = boto3.client(
+            "s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=MINIO_ACCESS_KEY,
+            aws_secret_access_key=MINIO_SECRET_KEY,
+            config=Config(signature_version="s3v4"),
+            region_name="us-east-1",
+        )
+        logging.info(f"MTCNNCropper initialized on {device}")
+
+    def __call__(self, batch: dict) -> dict:
+        keys = []
+        labels = []
+
+        for i in range(len(batch["path"])):
+            path = batch["path"][i]
+            label = batch["label"][i]
+            filename = batch["filename"][i]
+            training_job_id = batch["training_job_id"][i]
+            tenant_id = batch["tenant_id"][i]
+            face_based = batch["face_based"][i]
+
+            try:
+                img = Image.open(path).convert("RGB")
+                img_array = np.array(img)
+
+                if face_based:
+                    boxes, _ = self.detector.detect(img_array)
+                    if boxes is None or len(boxes) == 0:
+                        keys.append(None)
+                        labels.append(label)
+                        continue
+                    box = max(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
+                    x1, y1, x2, y2 = [max(0, int(v)) for v in box]
+                    cropped = img_array[y1:y2, x1:x2]
+                    if cropped.size == 0:
+                        keys.append(None)
+                        labels.append(label)
+                        continue
+                    img = Image.fromarray(cropped)
+
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG")
+                object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/cropped/{label}/{filename}"
+                self.s3.put_object(
+                    Bucket=TRAINING_BUCKET,
+                    Key=object_key,
+                    Body=buf.getvalue(),
+                )
+                keys.append(object_key)
+                labels.append(label)
+
+            except Exception as e:
+                logging.error(f"Error processing {filename}: {e}")
+                keys.append(None)
+                labels.append(label)
+
+        return {"key": keys, "label": labels}
+
+
 class BasePreprocessConsumer:
 
     def __init__(self):
@@ -81,31 +151,18 @@ class BasePreprocessConsumer:
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         )
-        self._detector = None
-
-    def _get_detector(self):
-        if self._detector is None:
-            from facenet_pytorch import MTCNN
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self._detector = MTCNN(keep_all=True, device=device)
-            logging.info(f"MTCNN initialized on {device}")
-        return self._detector
-
-    def _crop_face(self, img_array: np.ndarray):
-        """얼굴 검출 + 크롭. 미검출 시 None 반환."""
-        detector = self._get_detector()
-        boxes, _ = detector.detect(img_array)
-        if boxes is None or len(boxes) == 0:
-            return None
-        # 가장 큰 얼굴 선택
-        box = max(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
-        x1, y1, x2, y2 = [max(0, int(v)) for v in box]
-        cropped = img_array[y1:y2, x1:x2]
-        if cropped.size == 0:
-            return None
-        return Image.fromarray(cropped)
 
     def run(self):
+        # Ray 클러스터 연결 — 한 번만
+        if not ray.is_initialized():
+            ray.init(
+                address="ray://ray-cluster-kuberay-head-svc.kuberay.svc.cluster.local:10001",
+                runtime_env={
+                    "pip": ["facenet-pytorch==2.6.0", "boto3==1.43.45", "Pillow", "numpy==1.26.0"]
+                }
+            )
+            logging.info("Connected to Ray cluster")
+
         logging.info("Preprocess consumer started. Listening on preprocess-topic...")
         for message in self.consumer:
             payload = message.value
@@ -146,10 +203,8 @@ class BasePreprocessConsumer:
             with open(labels_path) as f:
                 labels = json.load(f)
 
-            # 4. 크롭 + MinIO 업로드
-            logging.info(f"[4/4] Cropping and uploading (face_based={face_based})")
-            processed = {"real": [], "fake": [], "skipped": 0}
-            total = 0
+            # 4. Ray Data로 병렬 크롭 + MinIO 업로드
+            logging.info(f"[4/4] Cropping with Ray Data (face_based={face_based})")
 
             all_images = (
                 list(Path(extract_dir).rglob("*.jpg")) +
@@ -157,49 +212,44 @@ class BasePreprocessConsumer:
                 list(Path(extract_dir).rglob("*.jpeg"))
             )
 
-            for img_path in all_images:
-                filename = img_path.name
-                if filename not in labels:
-                    continue
+            items = [
+                {
+                    "path": str(img_path),
+                    "label": labels[img_path.name],
+                    "filename": img_path.name,
+                    "training_job_id": training_job_id,
+                    "tenant_id": tenant_id,
+                    "face_based": face_based,
+                }
+                for img_path in all_images
+                if img_path.name in labels
+            ]
 
-                total += 1
-                label = labels[filename]
+            total = len(items)
 
-                img = Image.open(str(img_path)).convert("RGB")
-                img_array = np.array(img)
+            # Ray Dataset 생성 + 병렬 처리
+            ds = ray.data.from_items(items)
+            result_ds = ds.map_batches(
+                MTCNNCropper,
+                compute=ActorPoolStrategy(size=2),
+                batch_size=16,
+            )
 
-                if face_based:
-                    cropped = self._crop_face(img_array)
-                    if cropped is None:
-                        processed["skipped"] += 1
-                        logging.warning(f"Skipped (no face detected): {filename}")
-                        continue
-                    img = cropped
-                else:
-                    img = Image.fromarray(img_array)
-
-                # .jpg로 저장
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG")
-                jpg_bytes = buf.getvalue()
-
-                object_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/cropped/{label}/{filename}"
-                self.s3.put_object(
-                    Bucket=TRAINING_BUCKET,
-                    Key=object_key,
-                    Body=jpg_bytes,
-                )
-                processed[label].append(object_key)
+            # 결과 수집
+            results = result_ds.take_all()
+            real_keys = [r["key"] for r in results if r["label"] == "real" and r["key"] is not None]
+            fake_keys = [r["key"] for r in results if r["label"] == "fake" and r["key"] is not None]
+            skipped = len([r for r in results if r["key"] is None])
 
             if total > 0:
-                skip_ratio = processed["skipped"] / total
-                logging.info(f"Skip ratio: {skip_ratio:.1%} ({processed['skipped']}/{total})")
+                skip_ratio = skipped / total
+                logging.info(f"Skip ratio: {skip_ratio:.1%} ({skipped}/{total})")
                 if skip_ratio >= SKIP_THRESHOLD:
                     raise Exception(
                         f"Too many skipped images: {skip_ratio:.1%} >= {SKIP_THRESHOLD:.1%}. Job failed."
                     )
 
-            logging.info(f"Cropped: real={len(processed['real'])}, fake={len(processed['fake'])}, skipped={processed['skipped']}")
+            logging.info(f"Cropped: real={len(real_keys)}, fake={len(fake_keys)}, skipped={skipped}")
 
             # 5. train-topic으로 발행
             train_payload = {
@@ -208,8 +258,8 @@ class BasePreprocessConsumer:
                 "epochs": payload["epochs"],
                 "batch_size": payload["batch_size"],
                 "lr": payload["lr"],
-                "real_keys": processed["real"],
-                "fake_keys": processed["fake"],
+                "real_keys": real_keys,
+                "fake_keys": fake_keys,
             }
             self.producer.send(TRAIN_TOPIC, train_payload)
             self.producer.flush()
