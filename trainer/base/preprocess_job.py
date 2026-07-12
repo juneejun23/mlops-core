@@ -24,8 +24,6 @@ SKIP_THRESHOLD = float(os.environ.get("SKIP_THRESHOLD", "0.5"))
 
 
 class MTCNNCropper:
-    """Ray Data Actor — MTCNN 얼굴 검출 + 크롭 + MinIO 저장."""
-
     def __init__(self):
         from facenet_pytorch import MTCNN as FacenetMTCNN
         import torch
@@ -45,8 +43,8 @@ class MTCNNCropper:
         keys = []
         labels_out = []
 
-        for i in range(len(batch["path"])):
-            path = batch["path"][i]
+        for i in range(len(batch["minio_path"])):
+            minio_path = batch["minio_path"][i]  # MinIO 경로
             label = batch["label"][i]
             filename = batch["filename"][i]
             training_job_id = batch["training_job_id"][i]
@@ -54,7 +52,10 @@ class MTCNNCropper:
             face_based = batch["face_based"][i]
 
             try:
-                img = Image.open(path).convert("RGB")
+                # MinIO에서 직접 이미지 읽기
+                response = self.s3.get_object(Bucket=TRAINING_BUCKET, Key=minio_path)
+                img_bytes = response["Body"].read()
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 img_array = np.array(img)
 
                 if face_based:
