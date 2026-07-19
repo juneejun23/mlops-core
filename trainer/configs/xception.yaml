@@ -1,0 +1,13 @@
+model:
+  name: xception
+  num_classes: 2
+  input_size: 256
+
+preprocessing:
+  mean: 0.5
+  std: 0.5
+
+training:
+  optimizer: adam
+  early_stopping: true
+  patience: 3

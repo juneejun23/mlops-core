@@ -47,6 +47,7 @@ class TrainingJob(Base):
     result_url = Column(String, default="")
     metrics = Column(JSON)
     error_msg = Column(String, default="")
+    ray_job_id = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
