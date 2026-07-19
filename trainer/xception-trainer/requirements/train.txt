@@ -1,3 +1,12 @@
-boto3
-numpy
-kafka-python
+boto3==1.43.45
+numpy==1.26.0
+kafka-python==3.0.8
+torch==2.2.2
+torchvision==0.17.2
+Pillow
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
+pyyaml
+ray[default]
+pandas
+pyarrow

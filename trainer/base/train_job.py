@@ -9,6 +9,7 @@ import json
 import argparse
 import tempfile
 import logging
+import yaml
 from datetime import datetime
 
 import numpy as np
@@ -28,10 +29,6 @@ from sqlalchemy.orm import sessionmaker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# =============================================
-# 환경변수
-# =============================================
-
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio.minio.svc.cluster.local:9000")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "quHCnPBfDaYU0UsV0vfM")
@@ -41,10 +38,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mlops:dashlove@postg
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
-
-# =============================================
-# DB 업데이트
-# =============================================
 
 def update_status(training_job_id: str, status: str, metrics: dict = None, error_msg: str = None):
     db = SessionLocal()
@@ -67,13 +60,31 @@ def update_status(training_job_id: str, status: str, metrics: dict = None, error
         db.close()
 
 
-# =============================================
-# Ray Data Actor — MinIO에서 .jpg 읽어서 전처리
-# =============================================
+def validate_architecture(architecture: str) -> dict:
+    """모델명, yaml, .py 파일 일치 확인. 통과 시 config 반환."""
+    config_path = f"configs/{architecture}.yaml"
+    model_path = f"models/{architecture}.py"
+
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config not found: {config_path}")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model not found: {model_path}")
+
+    with open(config_path) as f:
+        model_config = yaml.safe_load(f)
+
+    config_name = model_config.get("model", {}).get("name")
+    if config_name != architecture:
+        raise ValueError(
+            f"Architecture mismatch: payload='{architecture}' but config says '{config_name}'"
+        )
+
+    logging.info(f"[train_job] 모델 검증 완료: {architecture}")
+    print(f"STDOUT: 모델 검증 완료 — {architecture}")
+    return model_config
+
 
 class ImagePreprocessor:
-    """xception 전처리 Actor — MinIO에서 직접 읽음."""
-
     def __init__(self):
         self.s3 = boto3.client(
             "s3",
@@ -95,7 +106,6 @@ class ImagePreprocessor:
             img_bytes = response["Body"].read()
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-            # xception 전처리 (xception-consumer와 동일)
             img = img.resize((256, 256))
             img_array = np.array(img).astype(np.float32)
             img_array = (img_array / 255.0 - 0.5) / 0.5
@@ -109,10 +119,6 @@ class ImagePreprocessor:
             "label": np.array(labels),
         }
 
-
-# =============================================
-# Xception 모델
-# =============================================
 
 class SeparableConv2d(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, padding=0):
@@ -188,17 +194,21 @@ class Xception(nn.Module):
         return self.fc(x)
 
 
-# =============================================
-# train_loop_per_worker
-# =============================================
-
 def train_loop_per_worker(config: dict):
     epochs = config["epochs"]
     batch_size = config["batch_size"]
     lr = config["lr"]
+    architecture = config["architecture"]
+    num_classes = config["num_classes"]
 
     train_shard = train.get_dataset_shard("train")
-    model = Xception(num_classes=2)
+
+    # architecture에 따라 모델 동적 로드
+    if architecture == "xception":
+        model = Xception(num_classes=num_classes)
+    else:
+        raise ValueError(f"Unsupported architecture: {architecture}")
+
     model = ray.train.torch.prepare_model(model)
 
     criterion = nn.CrossEntropyLoss()
@@ -241,10 +251,6 @@ def train_loop_per_worker(config: dict):
             best_loss = avg_loss
 
 
-# =============================================
-# 메인
-# =============================================
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--payload", type=str, required=True)
@@ -258,6 +264,11 @@ def main():
     batch_size = payload["batch_size"]
     lr = payload["lr"]
     tenant_id = payload["tenant_id"]
+    architecture = payload["architecture"]
+
+    # 모델명 + yaml + .py 파일 일치 확인
+    model_config = validate_architecture(architecture)
+    num_classes = model_config["model"]["num_classes"]
 
     ray.init()
     logging.info(f"[train_job] 학습 시작: {training_job_id}")
@@ -266,7 +277,6 @@ def main():
     try:
         update_status(training_job_id, "TRAINING")
 
-        # Ray Data Dataset 구성
         items = (
             [{"minio_path": k, "label": "real"} for k in real_keys] +
             [{"minio_path": k, "label": "fake"} for k in fake_keys]
@@ -278,13 +288,14 @@ def main():
             batch_size=16,
         )
 
-        # TorchTrainer 실행
         trainer = TorchTrainer(
             train_loop_per_worker=train_loop_per_worker,
             train_loop_config={
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "lr": lr,
+                "architecture": architecture,
+                "num_classes": num_classes,
             },
             datasets={"train": ds},
             scaling_config=ScalingConfig(
@@ -300,7 +311,6 @@ def main():
         logging.info(f"[train_job] 학습 완료: loss={final_loss}, accuracy={final_accuracy}")
         print(f"STDOUT: 학습 완료 — loss={final_loss}, accuracy={final_accuracy}")
 
-        # 모델 가중치 MinIO 저장
         s3 = boto3.client(
             "s3",
             endpoint_url=MINIO_ENDPOINT,
@@ -310,7 +320,6 @@ def main():
             region_name="us-east-1",
         )
 
-        # 체크포인트에서 모델 가중치 가져와서 MinIO 저장
         if result.checkpoint:
             with result.checkpoint.as_directory() as tmpdir:
                 model_path = os.path.join(tmpdir, "model.pt")
@@ -320,7 +329,6 @@ def main():
                     logging.info(f"[train_job] 모델 저장: {model_key}")
                     print(f"STDOUT: 모델 저장 완료 — {model_key}")
 
-        # DB COMPLETED 업데이트
         metrics = {
             "loss": final_loss,
             "accuracy": final_accuracy,

@@ -1,11 +1,9 @@
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
-
 WORKDIR /app
-
 COPY trainer/xception-trainer/requirements/train.txt .
 RUN pip install --no-cache-dir -r train.txt
-
 COPY trainer/base/ .
+COPY trainer/models/ models/
+COPY trainer/configs/ configs/
 COPY trainer/xception-trainer/train_consumer.py .
-
 CMD ["python", "-u", "train_consumer.py"]
