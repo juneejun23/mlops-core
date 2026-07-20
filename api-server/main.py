@@ -214,6 +214,8 @@ def start_training(training_job_id: str, db: Session = Depends(get_db)):
         "batch_size": job.batch_size,
         "lr": job.lr,
         "tenant_id": job.tenant_id,
+        "architecture": job.architecture,
+        "training_job_id": training_job_id,
     }
 
     ray_client = JobSubmissionClient(RAY_DASHBOARD_URL)

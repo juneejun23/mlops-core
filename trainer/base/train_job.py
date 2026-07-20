@@ -200,10 +200,11 @@ def train_loop_per_worker(config: dict):
     lr = config["lr"]
     architecture = config["architecture"]
     num_classes = config["num_classes"]
+    tenant_id = config["tenant_id"]
+    training_job_id = config["training_job_id"]
 
     train_shard = train.get_dataset_shard("train")
 
-    # architecture에 따라 모델 동적 로드
     if architecture == "xception":
         model = Xception(num_classes=num_classes)
     else:
@@ -213,8 +214,6 @@ def train_loop_per_worker(config: dict):
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    best_loss = float("inf")
 
     for epoch in range(epochs):
         model.train()
@@ -247,8 +246,24 @@ def train_loop_per_worker(config: dict):
         print(f"[train_job] Epoch {epoch}: loss={avg_loss:.4f}, accuracy={accuracy:.4f}")
         ray.train.report({"epoch": epoch, "loss": avg_loss, "accuracy": accuracy})
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        # 마지막 epoch에서 rank 0만 MinIO에 모델 저장
+        if epoch == epochs - 1 and ray.train.get_context().get_world_rank() == 0:
+            base_model = model.module if hasattr(model, "module") else model
+            buf = io.BytesIO()
+            torch.save(base_model.state_dict(), buf)
+            buf.seek(0)
+
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=MINIO_ENDPOINT,
+                aws_access_key_id=MINIO_ACCESS_KEY,
+                aws_secret_access_key=MINIO_SECRET_KEY,
+                config=Config(signature_version="s3v4"),
+                region_name="us-east-1",
+            )
+            model_key = f"tenants/{tenant_id}/training-jobs/{training_job_id}/model/model.pt"
+            s3.put_object(Bucket=TRAINING_BUCKET, Key=model_key, Body=buf.getvalue())
+            print(f"[train_job] 모델 저장 완료: {model_key}")
 
 
 def main():
@@ -296,6 +311,8 @@ def main():
                 "lr": lr,
                 "architecture": architecture,
                 "num_classes": num_classes,
+                "tenant_id": tenant_id,
+                "training_job_id": training_job_id,
             },
             datasets={"train": ds},
             scaling_config=ScalingConfig(
